@@ -1,0 +1,170 @@
+#!/bin/bash
+
+PROGRAM=scapture
+VERSION=0.1.0
+
+SHOTS_PREFIX="${SCAPTURE_SHOTS_PREFIX:-${HOME}/Pictures/screenshots}"
+RECORDS_PREFIX="${SCAPTURE_RECORDS_PREFIX:-${HOME}/Videos/screenrecords}"
+RUNTIME_DIR="${SCAPTURE_RECORDS_PREFIX:-${XDG_RUNTIME_DIR:+${XDG_RUNTIME_DIR}/${PROGRAM}}}"
+
+FFMPEG_STDIN_FILE="${RUNTIME_DIR}/ffmpeg-stdin"
+FFMPEG_PID_FILE="${RUNTIME_DIR}/ffmpeg-pid"
+
+die() {
+	[ $# -gt 0 ] && printf "${PROGRAM}: $1\n" "$2"
+	exit 1
+}
+
+make_path() {
+	local dt
+	mkdir --parents "$1" || die 'cannot create target directory: %s' "$1"
+	dt="$(date --utc +%Y-%m-%dT%H-%M-%S-%N)" || die 'cannot get date and time'
+	printf '%sz' "$1/${dt:0:23}"
+}
+
+select_area() {
+	slop --tolerance=0 --color=0.3,0.4,0.6 --nodrag || die 'cannot select screen area'
+}
+
+shotgun_cmd() {
+	local clip="$1" rc basepath
+	shift
+	if [ "${clip}" -eq 1 ]; then
+		shotgun "$@" - | xclip -target image/png -selection clipboard
+		rc=( "${PIPESTATUS[@]}" )
+		[ ${rc[0]} -eq 0 ] || die 'shutgun error'
+		[ ${rc[1]} -eq 0 ] || die 'cannot store screenshot into clipboard'
+	else
+		basepath="$(make_path "${SHOTS_PREFIX}")" || die
+		shotgun "$@" "${basepath}.png" || die
+	fi
+}
+
+check_runtime_dir() {
+	[ -n "${RUNTIME_DIR}" ] || die 'runtime directory is not configured'
+}
+
+check_recording() {
+	local pid cmd
+
+	if [ ! -f "${FFMPEG_PID_FILE}" ]; then
+		return 0
+	fi
+
+	read pid < "${FFMPEG_PID_FILE}" || die 'cannot read PID file: %s' "${FFMPEG_PID_FILE}"
+	[[ "${pid}" =~ '\d+' ]] || die 'bad PID in the file: %s' "${FFMPEG_PID_FILE}"
+
+	cmd="$(ps --no-headers --pid "${pid}" --format args)"
+	if [ $? -ne 0 ]; then
+		return 0
+	fi
+
+	! grep --extended-regexp --quiet '^ffmpeg( \S+)* -f x11grab' <<< "${cmd}" \
+		|| die 'recording is already underway, PID: %s' "${pid}"
+}
+
+ffmpeg_cmd() {
+	local basepath pid cmd exitcode
+
+	check_runtime_dir
+	check_recording
+
+	mkdir --parents "${RUNTIME_DIR}" || die 'cannot create runtime directory: %s' "${RUNTIME_DIR}"
+	> "${FFMPEG_STDIN_FILE}" || die 'cannot create FFMpeg STDIN file: %s' "${FFMPEG_STDIN_FILE}"
+
+	basepath="$(make_path "${RECORDS_PREFIX}")" || die
+
+	ffmpeg \
+		-v 16 \
+		-r 30 \
+		-f x11grab \
+		"$@" \
+		-preset slow \
+		-c:v h264 \
+		-pix_fmt yuv420p \
+		-crf 20 \
+		"${basepath}.mp4" < "${FFMPEG_STDIN_FILE}" &
+
+	pid=$!
+	echo "${pid}" > "${FFMPEG_PID_FILE}" \
+		|| die 'cannot create FFMpeg PID file: %s' "${FFMPEG_PID_FILE}"
+	wait ${pid}
+	exitcode=$?
+
+	rm "${FFMPEG_STDIN_FILE}" || die 'cannot remove FFMpeg STDIN file: %s' "${FFMPEG_STDIN_FILE}"
+	rm "${FFMPEG_PID_FILE}" || die 'cannot remove FFMpeg PID file: %s' "${FFMPEG_STDIN_FILE}"
+	[ ${exitcode} -eq 0 ] || die 'ffmpeg failed'
+}
+
+shot_cmd() {
+	local opts clip=0 active_win_record selection
+
+	opts="$(getopt \
+		--options c \
+		--longoptions clip \
+		-- "$@")" || die
+
+	eval set -- "${opts}"
+
+	while :; do case "$1" in
+		--clip|-c) clip=1 && shift ;;
+		--) shift && break ;;
+	esac done
+
+	case "${1-screen}" in
+		screen)
+			shotgun_cmd "${clip}"
+		;;
+		active-window)
+			active_win_record="$(xprop -root 32x ':$0' _NET_ACTIVE_WINDOW)" \
+				|| die 'cannot get active window'
+			shotgun_cmd "${clip}" --id "${active_win_record#*:}"
+		;;
+		area)
+			selection="$(select_area)" || die
+			shotgun_cmd "${clip}" --geometry "${selection}"
+		;;
+		*)
+			die 'unknown argument: %s' "$1"
+		;;
+	esac
+}
+
+record_cmd() {
+	local selection w h x y
+
+	case "${1-screen}" in
+		screen)
+			die "not implemented yet: %s" "${PROGRAM} record screen"
+		;;
+		active-window)
+			die "not implemented yet: %s" "${PROGRAM} record active-window"
+		;;
+		area)
+			selection="$(select_area)" || die
+			IFS=+x read -r w h x y <<< "${selection}" \
+				|| die 'cannot assign representation of selected area to separate variables'
+			w=$((w - w % 2)) || die 'cannot calculate area width'
+			h=$((h - h % 2)) || die 'cannot calculate area height'
+			ffmpeg_cmd -s "${w}x${h}" -i ":0.0+$x,$y"
+		;;
+		*)
+			die 'unknown argument: %s' "$1"
+		;;
+	esac
+}
+
+stop_cmd() {
+	check_runtime_dir
+
+	[ -f "${FFMPEG_STDIN_FILE}" ] || die 'FFMpeg STDIN file not found: %s' "${FFMPEG_STDIN_FILE}"
+	echo q > "${FFMPEG_STDIN_FILE}"
+}
+
+case "$1" in
+	shot) shift && shot_cmd "$@" ;;
+	record) shift && record_cmd "$@" ;;
+	stop) stop_cmd ;;
+	'') die 'missing subcommand' ;;
+	*) die 'unknown subcommand: %s' "$1" ;;
+esac
