@@ -26,6 +26,12 @@ select_area() {
 	slop --tolerance=0 --color=0.3,0.4,0.6 --nodrag || die 'cannot select screen area'
 }
 
+active_window() {
+	local prop
+	prop="$(xprop -root 32x ':$0' _NET_ACTIVE_WINDOW)" || die 'cannot get active window'
+	echo "${prop#*:}"
+}
+
 shotgun_cmd() {
 	local clip="$1" rc basepath
 	shift
@@ -97,7 +103,7 @@ ffmpeg_cmd() {
 }
 
 shot_cmd() {
-	local opts clip=0 active_win_record selection
+	local opts clip=0 active_win selection
 
 	opts="$(getopt \
 		--options c \
@@ -116,9 +122,8 @@ shot_cmd() {
 			shotgun_cmd "${clip}"
 		;;
 		active-window)
-			active_win_record="$(xprop -root 32x ':$0' _NET_ACTIVE_WINDOW)" \
-				|| die 'cannot get active window'
-			shotgun_cmd "${clip}" --id "${active_win_record#*:}"
+			active_win="$(active_window)" || die
+			shotgun_cmd "${clip}" --id "${active_win}"
 		;;
 		area)
 			selection="$(select_area)" || die
@@ -130,23 +135,42 @@ shot_cmd() {
 	esac
 }
 
+make_ffmpeg_input() {
+	local w h x y
+	IFS=+x read -r w h x y <<< "$1" \
+		|| die 'cannot assign representation of selected area to separate variables'
+	w=$((w - w % 2)) || die 'cannot calculate area width'
+	h=$((h - h % 2)) || die 'cannot calculate area height'
+	echo "-s ${w}x${h} -i ${DISPLAY}+${x},${y}"
+}
+
 record_cmd() {
-	local selection w h x y
+	local active_win wininfo size offset input selection
 
 	case "${1-screen}" in
 		screen)
-			die "not implemented yet: %s" "${PROGRAM} record screen"
+			ffmpeg_cmd -i "${DISPLAY}"
 		;;
 		active-window)
-			die "not implemented yet: %s" "${PROGRAM} record active-window"
+			active_win="$(active_window)" || die
+			wininfo="$(xwininfo -id "${active_win}")" || die
+			size="$(
+				sed --quiet --regexp-extended \
+					'/^ *-geometry /s/^.* ([0-9]+x[0-9]+).*/\1/p' \
+					<<< "${wininfo}"
+			)" || die 'cannot extract size'
+			offset="$(
+				sed --quiet --regexp-extended \
+					'/^ *Corners:/s/^.* (\+[0-9]+\+[0-9]+).*/\1/p' \
+					<<< "${wininfo}"
+			)" || die 'cannot extract offset'
+			input="$(make_ffmpeg_input "${size}${offset}")" || die
+			ffmpeg_cmd ${input}
 		;;
 		area)
 			selection="$(select_area)" || die
-			IFS=+x read -r w h x y <<< "${selection}" \
-				|| die 'cannot assign representation of selected area to separate variables'
-			w=$((w - w % 2)) || die 'cannot calculate area width'
-			h=$((h - h % 2)) || die 'cannot calculate area height'
-			ffmpeg_cmd -s "${w}x${h}" -i ":0.0+$x,$y"
+			input="$(make_ffmpeg_input "${selection}")" || die
+			ffmpeg_cmd ${input}
 		;;
 		*)
 			die 'unknown argument: %s' "$1"
