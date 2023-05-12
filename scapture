@@ -172,23 +172,21 @@ record_cmd() {
 			input="$(make_ffmpeg_input "${selection}")" || die
 			ffmpeg_cmd ${input}
 		;;
+		stop)
+			check_runtime_dir
+			[ -f "${FFMPEG_STDIN_FILE}" ] \
+				|| die 'FFMpeg STDIN file not found: %s' "${FFMPEG_STDIN_FILE}"
+			echo q > "${FFMPEG_STDIN_FILE}"
+		;;
 		*)
 			die 'unknown argument: %s' "$1"
 		;;
 	esac
 }
 
-stop_cmd() {
-	check_runtime_dir
-
-	[ -f "${FFMPEG_STDIN_FILE}" ] || die 'FFMpeg STDIN file not found: %s' "${FFMPEG_STDIN_FILE}"
-	echo q > "${FFMPEG_STDIN_FILE}"
-}
-
 case "$1" in
 	shot) shift && shot_cmd "$@" ;;
 	record) shift && record_cmd "$@" ;;
-	stop) stop_cmd ;;
 	'') die 'missing subcommand' ;;
 	*) die 'unknown subcommand: %s' "$1" ;;
 esac
